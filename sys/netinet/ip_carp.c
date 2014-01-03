@@ -144,6 +144,8 @@ struct carp_if {
 #endif
 	struct ifnet	*cif_ifp;
 	struct mtx	cif_mtx;
+	uint32_t	cif_flags;
+#define	CIF_PROMISC	0x00000001
 };
 
 #define	CARP_INET	0
@@ -1477,11 +1479,8 @@ carp_alloc(struct ifnet *ifp)
 	struct carp_softc *sc;
 	struct carp_if *cif;
 
-	if ((cif = ifp->if_carp) == NULL) {
+	if ((cif = ifp->if_carp) == NULL)
 		cif = carp_alloc_if(ifp);
-		if (cif == NULL)
-			return (NULL);
-	}
 
 	sc = malloc(sizeof(*sc), M_CARP, M_WAITOK|M_ZERO);
 
@@ -1566,11 +1565,15 @@ static struct carp_if*
 carp_alloc_if(struct ifnet *ifp)
 {
 	struct carp_if *cif;
+	int error;
 
 	cif = malloc(sizeof(*cif), M_CARP, M_WAITOK|M_ZERO);
 
-	if (ifpromisc(ifp, 1) != 0)
-		goto cleanup;
+	if ((error = ifpromisc(ifp, 1)) != 0)
+		printf("%s: ifpromisc(%s) failed: %d\n",
+		    __func__, ifp->if_xname, error);
+	else
+		cif->cif_flags |= CIF_PROMISC;
 
 	CIF_LOCK_INIT(cif);
 	cif->cif_ifp = ifp;
@@ -1582,11 +1585,6 @@ carp_alloc_if(struct ifnet *ifp)
 	IF_ADDR_WUNLOCK(ifp);
 
 	return (cif);
-
-cleanup:
-	free(cif, M_CARP);
-
-	return (NULL);
 }
 
 static void
@@ -1604,7 +1602,8 @@ carp_free_if(struct carp_if *cif)
 
 	CIF_LOCK_DESTROY(cif);
 
-	ifpromisc(ifp, 0);
+	if (cif->cif_flags & CIF_PROMISC)
+		ifpromisc(ifp, 0);
 	if_rele(ifp);
 
 	free(cif, M_CARP);
@@ -1677,11 +1676,6 @@ carp_ioctl(struct ifreq *ifr, u_long cmd, struct thread *td)
 		}
 		if (sc == NULL) {
 			sc = carp_alloc(ifp);
-			if (sc == NULL) {
-				error = EINVAL; /* XXX: ifpromisc failed */
-				break;
-			}
-
 			CARP_LOCK(sc);
 			sc->sc_vhid = carpr.carpr_vhid;
 			LLADDR(&sc->sc_addr)[0] = 0;
