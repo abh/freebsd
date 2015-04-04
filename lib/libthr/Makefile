@@ -40,7 +40,6 @@ MAN=	libthr.3
 
 # enable extra internal consistancy checks
 CFLAGS+=-D_PTHREADS_INVARIANTS
-#CFLAGS+=-g
 
 PRECIOUSLIB=
 
@@ -63,5 +62,7 @@ SYMLINKS+=lib${LIB}_p.a ${LIBDIR}/libpthread_p.a
 .if !defined(WITHOUT_SYSCALL_COMPAT)
 CFLAGS+=-DSYSCALL_COMPAT
 .endif
+
+.include <bsd.arch.inc.mk>
 
 .include <bsd.lib.mk>

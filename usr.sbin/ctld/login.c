@@ -127,17 +127,17 @@ login_receive(struct connection *conn, bool initial)
 		log_errx(1, "received Login PDU with unsupported "
 		    "Version-min 0x%x", bhslr->bhslr_version_min);
 	}
-	if (ntohl(bhslr->bhslr_cmdsn) < conn->conn_cmdsn) {
+	if (ISCSI_SNLT(ntohl(bhslr->bhslr_cmdsn), conn->conn_cmdsn)) {
 		login_send_error(request, 0x02, 0x05);
 		log_errx(1, "received Login PDU with decreasing CmdSN: "
-		    "was %d, is %d", conn->conn_cmdsn,
+		    "was %u, is %u", conn->conn_cmdsn,
 		    ntohl(bhslr->bhslr_cmdsn));
 	}
 	if (initial == false &&
 	    ntohl(bhslr->bhslr_expstatsn) != conn->conn_statsn) {
 		login_send_error(request, 0x02, 0x05);
 		log_errx(1, "received Login PDU with wrong ExpStatSN: "
-		    "is %d, should be %d", ntohl(bhslr->bhslr_expstatsn),
+		    "is %u, should be %u", ntohl(bhslr->bhslr_expstatsn),
 		    conn->conn_statsn);
 	}
 	conn->conn_cmdsn = ntohl(bhslr->bhslr_cmdsn);
@@ -558,7 +558,7 @@ login_negotiate_key(struct pdu *request, const char *name,
 			tmp = MAX_DATA_SEGMENT_LENGTH;
 		}
 		conn->conn_max_data_segment_length = tmp;
-		keys_add_int(response_keys, name, tmp);
+		keys_add_int(response_keys, name, MAX_DATA_SEGMENT_LENGTH);
 	} else if (strcmp(name, "MaxBurstLength") == 0) {
 		tmp = strtoul(value, NULL, 10);
 		if (tmp <= 0) {
@@ -827,19 +827,22 @@ login(struct connection *conn)
 			log_errx(1, "received Login PDU without TargetName");
 		}
 
-		conn->conn_target = target_find(pg->pg_conf, target_name);
-		if (conn->conn_target == NULL) {
+		conn->conn_port = port_find_in_pg(pg, target_name);
+		if (conn->conn_port == NULL) {
 			login_send_error(request, 0x02, 0x03);
 			log_errx(1, "requested target \"%s\" not found",
 			    target_name);
 		}
+		conn->conn_target = conn->conn_port->p_target;
 	}
 
 	/*
 	 * At this point we know what kind of authentication we need.
 	 */
 	if (conn->conn_session_type == CONN_SESSION_TYPE_NORMAL) {
-		ag = conn->conn_target->t_auth_group;
+		ag = conn->conn_port->p_auth_group;
+		if (ag == NULL)
+			ag = conn->conn_target->t_auth_group;
 		if (ag->ag_name != NULL) {
 			log_debugx("initiator requests to connect "
 			    "to target \"%s\"; auth-group \"%s\"",

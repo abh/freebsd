@@ -897,7 +897,6 @@ xpt_init(void *dummy)
 	if ((status = xpt_create_path(&path, NULL, CAM_XPT_PATH_ID,
 				      CAM_TARGET_WILDCARD,
 				      CAM_LUN_WILDCARD)) != CAM_REQ_CMP) {
-		mtx_unlock(&xsoftc.xpt_lock);
 		printf("xpt_init: xpt_create_path failed with status %#x,"
 		       " failing attach\n", status);
 		return (EINVAL);
@@ -4794,6 +4793,7 @@ xpt_release_device(struct cam_ed *device)
 	 */
 	free(device->supported_vpds, M_CAMXPT);
 	free(device->device_id, M_CAMXPT);
+	free(device->ext_inq, M_CAMXPT);
 	free(device->physpath, M_CAMXPT);
 	free(device->rcap_buf, M_CAMXPT);
 	free(device->serial_num, M_CAMXPT);

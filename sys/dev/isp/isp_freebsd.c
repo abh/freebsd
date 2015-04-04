@@ -29,6 +29,7 @@
  */
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
+
 #include <dev/isp/isp_freebsd.h>
 #include <sys/unistd.h>
 #include <sys/kthread.h>
@@ -877,7 +878,7 @@ is_lun_enabled(ispsoftc_t *isp, int bus, lun_id_t lun)
 
 	ISP_GET_PC_ADDR(isp, bus, lun_hash[LUN_HASH_FUNC(lun)], lhp);
 	SLIST_FOREACH(tptr, lhp, next) {
-		if (xpt_path_lun_id(tptr->owner) == lun) {
+		if (tptr->ts_lun == lun) {
 			return (1);
 		}
 	}
@@ -909,16 +910,13 @@ get_lun_statep(ispsoftc_t *isp, int bus, lun_id_t lun)
 {
 	tstate_t *tptr = NULL;
 	struct tslist *lhp;
-	int i;
 
 	if (bus < isp->isp_nchan) {
-		for (i = 0; i < LUN_HASH_SIZE; i++) {
-			ISP_GET_PC_ADDR(isp, bus, lun_hash[i], lhp);
-			SLIST_FOREACH(tptr, lhp, next) {
-				if (xpt_path_lun_id(tptr->owner) == lun) {
-					tptr->hold++;
-					return (tptr);
-				}
+		ISP_GET_PC_ADDR(isp, bus, lun_hash[LUN_HASH_FUNC(lun)], lhp);
+		SLIST_FOREACH(tptr, lhp, next) {
+			if (tptr->ts_lun == lun) {
+				tptr->hold++;
+				return (tptr);
 			}
 		}
 	}
@@ -1132,6 +1130,7 @@ create_lun_state(ispsoftc_t *isp, int bus, struct cam_path *path, tstate_t **rsl
 	if (tptr == NULL) {
 		return (CAM_RESRC_UNAVAIL);
 	}
+	tptr->ts_lun = lun;
 	status = xpt_create_path(&tptr->owner, NULL, xpt_path_path_id(path), xpt_path_target_id(path), lun);
 	if (status != CAM_REQ_CMP) {
 		free(tptr, M_DEVBUF);
@@ -1149,7 +1148,7 @@ create_lun_state(ispsoftc_t *isp, int bus, struct cam_path *path, tstate_t **rsl
 		tptr->ntpool[i].next = &tptr->ntpool[i+1];
 	tptr->ntfree = tptr->ntpool;
 	tptr->hold = 1;
-	ISP_GET_PC_ADDR(isp, bus, lun_hash[LUN_HASH_FUNC(xpt_path_lun_id(tptr->owner))], lhp);
+	ISP_GET_PC_ADDR(isp, bus, lun_hash[LUN_HASH_FUNC(lun)], lhp);
 	SLIST_INSERT_HEAD(lhp, tptr, next);
 	*rslt = tptr;
 	ISP_PATH_PRT(isp, ISP_LOGTDEBUG0, path, "created tstate\n");
@@ -1180,7 +1179,7 @@ destroy_lun_state(ispsoftc_t *isp, tstate_t *tptr)
 			xpt_done(ccb);
 		}
 	} while (ccb);
-	ISP_GET_PC_ADDR(isp, cam_sim_bus(xpt_path_sim(tptr->owner)), lun_hash[LUN_HASH_FUNC(xpt_path_lun_id(tptr->owner))], lhp);
+	ISP_GET_PC_ADDR(isp, cam_sim_bus(xpt_path_sim(tptr->owner)), lun_hash[LUN_HASH_FUNC(tptr->ts_lun)], lhp);
 	SLIST_REMOVE(lhp, tptr, tstate, next);
 	ISP_PATH_PRT(isp, ISP_LOGTDEBUG0, tptr->owner, "destroyed tstate\n");
 	xpt_free_path(tptr->owner);
@@ -1356,7 +1355,7 @@ isp_enable_deferred_luns(ispsoftc_t *isp, int bus)
 		SLIST_FOREACH(tptr, lhp, next) {
 			tptr->hold++;
 			if (tptr->enabled == 0) {
-				if (isp_enable_deferred(isp, bus, xpt_path_lun_id(tptr->owner)) == CAM_REQ_CMP) {
+				if (isp_enable_deferred(isp, bus, tptr->ts_lun) == CAM_REQ_CMP) {
 					tptr->enabled = 1;
 					n++;
 				}
@@ -4540,7 +4539,7 @@ isp_watchdog(void *arg)
 }
 
 static void
-isp_make_here(ispsoftc_t *isp, int chan, int tgt)
+isp_make_here(ispsoftc_t *isp, fcportdb_t *fcp, int chan, int tgt)
 {
 	union ccb *ccb;
 	struct isp_fc *fc = ISP_FC_PC(isp, chan);
@@ -4563,11 +4562,18 @@ isp_make_here(ispsoftc_t *isp, int chan, int tgt)
 		xpt_free_ccb(ccb);
 		return;
 	}
+
+	/*
+	 * Since we're about to issue a rescan, mark this device as not
+	 * reported gone.
+	 */
+	fcp->reported_gone = 0;
+
 	xpt_rescan(ccb);
 }
 
 static void
-isp_make_gone(ispsoftc_t *isp, int chan, int tgt)
+isp_make_gone(ispsoftc_t *isp, fcportdb_t *fcp, int chan, int tgt)
 {
 	struct cam_path *tp;
 	struct isp_fc *fc = ISP_FC_PC(isp, chan);
@@ -4576,6 +4582,11 @@ isp_make_gone(ispsoftc_t *isp, int chan, int tgt)
 		return;
 	}
 	if (xpt_create_path(&tp, NULL, cam_sim_path(fc->sim), tgt, CAM_LUN_WILDCARD) == CAM_REQ_CMP) {
+		/*
+		 * We're about to send out the lost device async
+		 * notification, so indicate that we have reported it gone.
+		 */
+		fcp->reported_gone = 1;
 		xpt_async(AC_LOST_DEVICE, tp, NULL);
 		xpt_free_path(tp);
 	}
@@ -4629,7 +4640,7 @@ isp_gdt_task(void *arg, int pending)
 		lp->dev_map_idx = 0;
 		lp->state = FC_PORTDB_STATE_NIL;
 		isp_prt(isp, ISP_LOGCONFIG, prom3, chan, lp->portid, tgt, "Gone Device Timeout");
-		isp_make_gone(isp, chan, tgt);
+		isp_make_gone(isp, lp, chan, tgt);
 	}
 	if (fc->ready) {
 		if (more_to_do) {
@@ -4722,7 +4733,7 @@ isp_ldt_task(void *arg, int pending)
 		lp->dev_map_idx = 0;
 		lp->state = FC_PORTDB_STATE_NIL;
 		isp_prt(isp, ISP_LOGCONFIG, prom3, chan, lp->portid, tgt, "Loop Down Timeout");
-		isp_make_gone(isp, chan, tgt);
+		isp_make_gone(isp, lp, chan, tgt);
 	}
 
 	if (FCPARAM(isp, chan)->role & ISP_ROLE_INITIATOR) {
@@ -5084,19 +5095,34 @@ isp_action(struct cam_sim *sim, union ccb *ccb)
 		break;
 #endif
 	case XPT_RESET_DEV:		/* BDR the specified SCSI device */
+	{
+		struct isp_fc *fc;
 
 		bus = cam_sim_bus(xpt_path_sim(ccb->ccb_h.path));
 		tgt = ccb->ccb_h.target_id;
 		tgt |= (bus << 16);
+		if (IS_FC(isp))
+			fc = ISP_FC_PC(isp, bus);
+		else
+			fc = NULL;
 
 		error = isp_control(isp, ISPCTL_RESET_DEV, bus, tgt);
 		if (error) {
 			ccb->ccb_h.status = CAM_REQ_CMP_ERR;
 		} else {
+			/*
+			 * If we have a FC device, reset the Command
+			 * Reference Number, because the target will expect
+			 * that we re-start the CRN at 1 after a reset.
+			 */
+			if (fc != NULL)
+				isp_fcp_reset_crn(fc, tgt, /*tgt_set*/ 1);
+
 			ccb->ccb_h.status = CAM_REQ_CMP;
 		}
 		xpt_done(ccb);
 		break;
+	}
 	case XPT_ABORT:			/* Abort the specified CCB */
 	{
 		union ccb *accb = ccb->cab.abort_ccb;
@@ -5534,6 +5560,21 @@ isp_done(XS_T *sccb)
 	if (status != CAM_REQ_CMP) {
 		if (status != CAM_SEL_TIMEOUT)
 			isp_prt(isp, ISP_LOGDEBUG0, "target %d lun %d CAM status 0x%x SCSI status 0x%x", XS_TGT(sccb), XS_LUN(sccb), sccb->ccb_h.status, sccb->scsi_status);
+		else if ((IS_FC(isp))
+		      && (XS_TGT(sccb) < MAX_FC_TARG)) {
+			fcparam *fcp;
+			int hdlidx;
+
+			fcp = FCPARAM(isp, XS_CHANNEL(sccb));
+			hdlidx = fcp->isp_dev_map[XS_TGT(sccb)] - 1;
+			/*
+			 * Note that we have reported that this device is
+			 * gone.  If it reappears, we'll need to issue a
+			 * rescan.
+			 */
+			if (hdlidx > 0 && hdlidx < MAX_FC_TARG)
+				fcp->portdb[hdlidx].reported_gone = 1;
+		}
 		if ((sccb->ccb_h.status & CAM_DEV_QFRZN) == 0) {
 			sccb->ccb_h.status |= CAM_DEV_QFRZN;
 			xpt_freeze_devq(sccb->ccb_h.path, 1);
@@ -5669,6 +5710,8 @@ isp_async(ispsoftc_t *isp, ispasync_t cmd, ...)
 				}
 			}
 		}
+		isp_fcp_reset_crn(fc, /*tgt*/0, /*tgt_set*/ 0);
+
 		isp_prt(isp, ISP_LOGINFO, "Chan %d: %s", bus, msg);
 		break;
 	}
@@ -5720,7 +5763,8 @@ isp_async(ispsoftc_t *isp, ispasync_t cmd, ...)
 		if (lp->dev_map_idx) {
 			tgt = lp->dev_map_idx - 1;
 			isp_prt(isp, ISP_LOGCONFIG, prom2, bus, lp->portid, lp->handle, buf, "arrived at", tgt, (uint32_t) (lp->port_wwn >> 32), (uint32_t) lp->port_wwn);
-			isp_make_here(isp, bus, tgt);
+			isp_fcp_reset_crn(fc, tgt, /*tgt_set*/ 1);
+			isp_make_here(isp, lp, bus, tgt);
 		} else {
 			isp_prt(isp, ISP_LOGCONFIG, prom0, bus, lp->portid, lp->handle, buf, "arrived", (uint32_t) (lp->port_wwn >> 32), (uint32_t) lp->port_wwn);
 		}
@@ -5740,7 +5784,7 @@ isp_async(ispsoftc_t *isp, ispasync_t cmd, ...)
 				FCPARAM(isp, bus)->isp_dev_map[tgt] = 0;
 				lp->dev_map_idx = 0;
 				isp_prt(isp, ISP_LOGCONFIG, prom3, bus, lp->portid, tgt, "change is bad");
-				isp_make_gone(isp, bus, tgt);
+				isp_make_gone(isp, lp, bus, tgt);
 			} else {
 				isp_gen_role_str(buf, sizeof (buf), lp->prli_word3);
 				isp_prt(isp, ISP_LOGCONFIG, prom0, bus, lp->portid, lp->handle, buf, "changed and departed",
@@ -5756,6 +5800,7 @@ isp_async(ispsoftc_t *isp, ispasync_t cmd, ...)
 				tgt = lp->dev_map_idx - 1;
 				isp_prt(isp, ISP_LOGCONFIG, prom2, bus, lp->portid, lp->handle, buf, "changed at", tgt,
 				    (uint32_t) (lp->port_wwn >> 32), (uint32_t) lp->port_wwn);
+				isp_fcp_reset_crn(fc, tgt, /*tgt_set*/ 1);
 			} else {
 				isp_prt(isp, ISP_LOGCONFIG, prom0, bus, lp->portid, lp->handle, buf, "changed", (uint32_t) (lp->port_wwn >> 32), (uint32_t) lp->port_wwn);
 			}
@@ -5768,9 +5813,19 @@ isp_async(ispsoftc_t *isp, ispasync_t cmd, ...)
 		va_end(ap);
 		isp_gen_role_str(buf, sizeof (buf), lp->prli_word3);
 		if (lp->dev_map_idx) {
+			fc = ISP_FC_PC(isp, bus);
 			tgt = lp->dev_map_idx - 1;
 			isp_prt(isp, ISP_LOGCONFIG, prom2, bus, lp->portid, lp->handle, buf, "stayed at", tgt,
 		    	    (uint32_t) (lp->port_wwn >> 32), (uint32_t) lp->port_wwn);
+			/*
+			 * Only issue a rescan if we've actually reported
+			 * that this device is gone.
+			 */
+			if (lp->reported_gone != 0) {
+				isp_prt(isp, ISP_LOGCONFIG, prom2, bus, lp->portid, lp->handle, buf, "rescanned at", tgt, 
+				    (uint32_t) (lp->port_wwn >> 32), (uint32_t) lp->port_wwn);
+				isp_make_here(isp, lp, bus, tgt);
+			}
 		} else {
 			isp_prt(isp, ISP_LOGCONFIG, prom0, bus, lp->portid, lp->handle, buf, "stayed",
 		    	    (uint32_t) (lp->port_wwn >> 32), (uint32_t) lp->port_wwn);
@@ -5802,6 +5857,7 @@ isp_async(ispsoftc_t *isp, ispasync_t cmd, ...)
 			}
 			tgt = lp->dev_map_idx - 1;
 			isp_prt(isp, ISP_LOGCONFIG, prom2, bus, lp->portid, lp->handle, buf, "gone zombie at", tgt, (uint32_t) (lp->port_wwn >> 32), (uint32_t) lp->port_wwn);
+			isp_fcp_reset_crn(fc, tgt, /*tgt_set*/ 1);
 		} else if (lp->announced == 0) {
 			isp_prt(isp, ISP_LOGCONFIG, prom0, bus, lp->portid, lp->handle, buf, "departed", (uint32_t) (lp->port_wwn >> 32), (uint32_t) lp->port_wwn);
 		}
@@ -6011,7 +6067,7 @@ isp_async(ispsoftc_t *isp, ispasync_t cmd, ...)
 			 */
 			tptr = get_lun_statep_from_tag(isp, chan, abts->abts_rxid_task);
 			if (tptr) {
-				nt->nt_lun = xpt_path_lun_id(tptr->owner);
+				nt->nt_lun = tptr->ts_lun;
 				rls_lun_statep(isp, tptr);
 			} else {
 				nt->nt_lun = LUN_ANY;
@@ -6346,6 +6402,33 @@ isp_common_dmateardown(ispsoftc_t *isp, struct ccb_scsiio *csio, uint32_t hdl)
 		bus_dmamap_sync(isp->isp_osinfo.dmat, PISP_PCMD(csio)->dmap, BUS_DMASYNC_POSTWRITE);
 	}
 	bus_dmamap_unload(isp->isp_osinfo.dmat, PISP_PCMD(csio)->dmap);
+}
+
+/*
+ * Reset the command reference number for all LUNs on a specific target
+ * (needed when a target arrives again) or for all targets on a port
+ * (needed for events like a LIP).
+ */
+void
+isp_fcp_reset_crn(struct isp_fc *fc, uint32_t tgt, int tgt_set)
+{
+	int i;
+	struct isp_nexus *nxp;
+
+	if (tgt_set == 0)
+		isp_prt(fc->isp, ISP_LOG_SANCFG, "resetting CRN on all targets");
+	else
+		isp_prt(fc->isp, ISP_LOG_SANCFG, "resetting CRN target %u", tgt);
+
+	for (i = 0; i < NEXUS_HASH_WIDTH; i++) {
+		nxp = fc->nexus_hash[i];
+		while (nxp) {
+			if ((tgt_set != 0) && (tgt == nxp->tgt))
+				nxp->crnseed = 0;
+
+			nxp = nxp->next;
+		}
+	}
 }
 
 int

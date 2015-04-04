@@ -343,7 +343,6 @@ restart:
 	 * we watch for a place to put the new file in
 	 * case it doesn't already exist.
 	 */
-	ino = 0;
 	i_diroff = dp->i_diroff;
 	ss.slotstatus = FOUND;
 	ss.slotfreespace = ss.slotsize = ss.slotneeded = 0;
@@ -514,7 +513,7 @@ notfound:
 	/*
 	 * Insert name into cache (as non-existent) if appropriate.
 	 */
-	if ((cnp->cn_flags & MAKEENTRY) && nameiop != CREATE)
+	if ((cnp->cn_flags & MAKEENTRY) != 0)
 		cache_enter(vdp, NULL, cnp);
 	return (ENOENT);
 

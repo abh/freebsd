@@ -159,7 +159,7 @@ extern u_int64_t hammer_time(u_int64_t, u_int64_t);
 static void cpu_startup(void *);
 static void get_fpcontext(struct thread *td, mcontext_t *mcp,
     char *xfpusave, size_t xfpusave_len);
-static int  set_fpcontext(struct thread *td, const mcontext_t *mcp,
+static int  set_fpcontext(struct thread *td, mcontext_t *mcp,
     char *xfpustate, size_t xfpustate_len);
 SYSINIT(cpu, SI_SUB_CPU, SI_ORDER_FIRST, cpu_startup, NULL);
 
@@ -429,6 +429,7 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	regs->tf_rflags &= ~(PSL_T | PSL_D);
 	regs->tf_cs = _ucodesel;
 	regs->tf_ds = _udatasel;
+	regs->tf_ss = _udatasel;
 	regs->tf_es = _udatasel;
 	regs->tf_fs = _ufssel;
 	regs->tf_gs = _ugssel;
@@ -826,7 +827,7 @@ cpu_idle(int busy)
 	}
 
 	/* Apply AMD APIC timer C1E workaround. */
-	if (cpu_ident_amdc1e && cpu_disable_deep_sleep) {
+	if (cpu_ident_amdc1e && cpu_disable_c3_sleep) {
 		msr = rdmsr(MSR_AMDK8_IPM);
 		if (msr & AMDK8_CMPHALT)
 			wrmsr(MSR_AMDK8_IPM, msr & ~AMDK8_CMPHALT);
@@ -1521,6 +1522,8 @@ static char bootmethod[16] = "";
 SYSCTL_STRING(_machdep, OID_AUTO, bootmethod, CTLFLAG_RD, bootmethod, 0,
     "System firmware boot method");
 
+#define	PAGES_PER_GB	(1024 * 1024 * 1024 / PAGE_SIZE)
+
 /*
  * Populate the (physmap) array with base/bound pairs describing the
  * available physical memory in the system, then test this memory and
@@ -1541,6 +1544,7 @@ getmemsize(caddr_t kmdp, u_int64_t first)
 	struct bios_smap *smapbase;
 	struct efi_map_header *efihdr;
 	quad_t dcons_addr, dcons_size;
+	int page_counter;
 
 	bzero(physmap, sizeof(physmap));
 	basemem = 0;
@@ -1651,6 +1655,9 @@ getmemsize(caddr_t kmdp, u_int64_t first)
 	 * physmap is in bytes, so when converting to page boundaries,
 	 * round up the start address and round down the end address.
 	 */
+	page_counter = 0;
+	if (memtest != 0)
+		printf("Testing system memory");
 	for (i = 0; i <= physmap_idx; i += 2) {
 		vm_paddr_t end;
 
@@ -1679,6 +1686,14 @@ getmemsize(caddr_t kmdp, u_int64_t first)
 			page_bad = FALSE;
 			if (memtest == 0)
 				goto skip_memtest;
+
+			/*
+			 * Print a "." every GB to show we're making
+			 * progress.
+			 */
+			page_counter++;
+			if ((page_counter % PAGES_PER_GB) == 0)
+				printf(".");
 
 			/*
 			 * map page into kernel: valid, read/write,non-cacheable
@@ -1767,6 +1782,8 @@ do_next:
 	}
 	*pte = 0;
 	invltlb();
+	if (memtest != 0)
+		printf("\n");
 
 	/*
 	 * XXX
@@ -2411,7 +2428,7 @@ get_mcontext(struct thread *td, mcontext_t *mcp, int flags)
  * touch the cs selector.
  */
 int
-set_mcontext(struct thread *td, const mcontext_t *mcp)
+set_mcontext(struct thread *td, mcontext_t *mcp)
 {
 	struct pcb *pcb;
 	struct trapframe *tp;
@@ -2498,7 +2515,7 @@ get_fpcontext(struct thread *td, mcontext_t *mcp, char *xfpusave,
 }
 
 static int
-set_fpcontext(struct thread *td, const mcontext_t *mcp, char *xfpustate,
+set_fpcontext(struct thread *td, mcontext_t *mcp, char *xfpustate,
     size_t xfpustate_len)
 {
 	struct savefpu *fpstate;

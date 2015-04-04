@@ -73,7 +73,7 @@ extern int vm_guest;		/* Running as virtual machine guest? */
  * Keep in sync with vm_guest_sysctl_names[].
  */
 enum VM_GUEST { VM_GUEST_NO = 0, VM_GUEST_VM, VM_GUEST_XEN, VM_GUEST_HV,
-		VM_LAST };
+		VM_GUEST_VMWARE, VM_LAST };
 
 #if defined(WITNESS) || defined(INVARIANTS)
 void	kassert_panic(const char *fmt, ...)  __printflike(1, 2);
@@ -295,8 +295,9 @@ sbintime_t 	cpu_idleclock(void);
 void	cpu_activeclock(void);
 void	cpu_new_callout(int cpu, sbintime_t bt, sbintime_t bt_opt);
 void	cpu_et_frequency(struct eventtimer *et, uint64_t newfreq);
-extern int	cpu_can_deep_sleep;
-extern int	cpu_disable_deep_sleep;
+extern int	cpu_deepest_sleep;
+extern int	cpu_disable_c2_sleep;
+extern int	cpu_disable_c3_sleep;
 
 int	cr_cansee(struct ucred *u1, struct ucred *u2);
 int	cr_canseesocket(struct ucred *cred, struct socket *so);

@@ -120,6 +120,12 @@ ehci_pci_match(device_t self)
 	case 0x43961002:
 		return ("AMD SB7x0/SB8x0/SB9x0 USB 2.0 controller");
 
+	case 0x0f348086:
+		return ("Intel BayTrail USB 2.0 controller");
+	case 0x1d268086:
+		return ("Intel Patsburg USB 2.0 controller");
+	case 0x1d2d8086:
+		return ("Intel Patsburg USB 2.0 controller");
 	case 0x1e268086:
 		return ("Intel Panther Point USB 2.0 controller");
 	case 0x1e2d8086:
@@ -274,6 +280,7 @@ ehci_pci_attach(device_t self)
 	sc->sc_bus.parent = self;
 	sc->sc_bus.devices = sc->sc_devices;
 	sc->sc_bus.devices_max = EHCI_MAX_DEVICES;
+	sc->sc_bus.dma_bits = 32;
 
 	/* get all DMA memory */
 	if (usb_bus_mem_alloc_all(&sc->sc_bus,

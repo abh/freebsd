@@ -34,9 +34,9 @@ __FBSDID("$FreeBSD$");
 #include "opt_vm.h"
 
 #include <sys/param.h>
-#include <sys/capability.h>
+#include <sys/capsicum.h>
 #include <sys/systm.h>
-#include <sys/capability.h>
+#include <sys/capsicum.h>
 #include <sys/eventhandler.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
@@ -292,7 +292,7 @@ kern_execve(td, args, mac_p)
 	    args->endp - args->begin_envv);
 	if (p->p_flag & P_HADTHREADS) {
 		PROC_LOCK(p);
-		if (thread_single(SINGLE_BOUNDARY)) {
+		if (thread_single(p, SINGLE_BOUNDARY)) {
 			PROC_UNLOCK(p);
 	       		exec_free_args(args);
 			return (ERESTART);	/* Try again later. */
@@ -311,9 +311,9 @@ kern_execve(td, args, mac_p)
 		 * force other threads to suicide.
 		 */
 		if (error == 0)
-			thread_single(SINGLE_EXIT);
+			thread_single(p, SINGLE_EXIT);
 		else
-			thread_single_end();
+			thread_single_end(p, SINGLE_BOUNDARY);
 		PROC_UNLOCK(p);
 	}
 	if ((td->td_pflags & TDP_EXECVMSPC) != 0) {
@@ -658,6 +658,8 @@ interpret:
 	 * it that it now has its own resources back
 	 */
 	p->p_flag |= P_EXEC;
+	if ((p->p_flag2 & P2_NOTRACE_EXEC) == 0)
+		p->p_flag2 &= ~P2_NOTRACE;
 	if (p->p_flag & P_PPWAIT) {
 		p->p_flag &= ~(P_PPWAIT | P_PPTRACE);
 		cv_broadcast(&p->p_pwait);

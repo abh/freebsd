@@ -174,6 +174,13 @@ kobject_kfree_name(struct kobject *kobj)
 
 struct kobj_type kfree_type = { .release = kobject_kfree };
 
+static void
+dev_release(struct device *dev)
+{
+	pr_debug("dev_release: %s\n", dev_name(dev));
+	kfree(dev);
+}
+
 struct device *
 device_create(struct class *class, struct device *parent, dev_t devt,
     void *drvdata, const char *fmt, ...)
@@ -186,6 +193,7 @@ device_create(struct class *class, struct device *parent, dev_t devt,
 	dev->class = class;
 	dev->devt = devt;
 	dev->driver_data = drvdata;
+	dev->release = dev_release;
 	va_start(args, fmt);
 	kobject_set_name_vargs(&dev->kobj, fmt, args);
 	va_end(args);
@@ -681,7 +689,7 @@ vunmap(void *addr)
 }
 
 static void
-linux_compat_init(void)
+linux_compat_init(void *arg)
 {
 	struct sysctl_oid *rootoid;
 	int i;
@@ -711,7 +719,7 @@ linux_compat_init(void)
 SYSINIT(linux_compat, SI_SUB_DRIVERS, SI_ORDER_SECOND, linux_compat_init, NULL);
 
 static void
-linux_compat_uninit(void)
+linux_compat_uninit(void *arg)
 {
 	kobject_kfree_name(&class_root);
 	kobject_kfree_name(&linux_rootdev.kobj);

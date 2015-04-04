@@ -101,6 +101,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_kern.h>
 #include <vm/vm_pager.h>
 #include <vm/vm_extern.h>
+#include <vm/vm_reserv.h>
 
 #define PFBAK 4
 #define PFFOR 4
@@ -334,10 +335,6 @@ RetryFault:;
 	map_generation = fs.map->timestamp;
 
 	if (fs.entry->eflags & MAP_ENTRY_NOFAULT) {
-		if ((curthread->td_pflags & TDP_DEVMEMIO) != 0) {
-			vm_map_unlock_read(fs.map);
-			return (KERN_FAILURE);
-		}
 		panic("vm_fault: fault on nofault entry, addr: %lx",
 		    (u_long)vaddr);
 	}
@@ -362,11 +359,13 @@ RetryFault:;
 	    (fault_flags & (VM_FAULT_CHANGE_WIRING | VM_FAULT_DIRTY)) == 0 &&
 	    /* avoid calling vm_object_set_writeable_dirty() */
 	    ((prot & VM_PROT_WRITE) == 0 ||
-	    fs.first_object->type != OBJT_VNODE ||
+	    (fs.first_object->type != OBJT_VNODE &&
+	    (fs.first_object->flags & OBJ_TMPFS_NODE) == 0) ||
 	    (fs.first_object->flags & OBJ_MIGHTBEDIRTY) != 0)) {
 		VM_OBJECT_RLOCK(fs.first_object);
 		if ((prot & VM_PROT_WRITE) != 0 &&
-		    fs.first_object->type == OBJT_VNODE &&
+		    (fs.first_object->type == OBJT_VNODE ||
+		    (fs.first_object->flags & OBJ_TMPFS_NODE) != 0) &&
 		    (fs.first_object->flags & OBJ_MIGHTBEDIRTY) == 0)
 			goto fast_failed;
 		m = vm_page_lookup(fs.first_object, fs.first_pindex);
@@ -846,6 +845,14 @@ vnode_locked:
 					unlock_and_deallocate(&fs);
 					goto RetryFault;
 				}
+#if VM_NRESERVLEVEL > 0
+				/*
+				 * Rename the reservation.
+				 */
+				vm_reserv_rename(fs.m, fs.first_object,
+				    fs.object, OFF_TO_IDX(
+				    fs.first_object->backing_object_offset));
+#endif
 				vm_page_xbusy(fs.m);
 				fs.first_m = fs.m;
 				fs.m = NULL;

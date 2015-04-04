@@ -496,6 +496,7 @@ _rtld(Elf_Addr *sp, func_ptr_type *exit_proc, Obj_Entry **objp)
       aux_info[AT_STACKPROT]->a_un.a_val != 0)
 	    stack_prot = aux_info[AT_STACKPROT]->a_un.a_val;
 
+#ifndef COMPAT_32BIT
     /*
      * Get the actual dynamic linker pathname from the executable if
      * possible.  (It should always be possible.)  That ensures that
@@ -508,6 +509,7 @@ _rtld(Elf_Addr *sp, func_ptr_type *exit_proc, Obj_Entry **objp)
 	obj_rtld.path = xstrdup(obj_main->interp);
         __progname = obj_rtld.path;
     }
+#endif
 
     digest_dynamic(obj_main, 0);
     dbg("%s valid_hash_sysv %d valid_hash_gnu %d dynsymcount %d",
@@ -863,7 +865,6 @@ digest_dynamic1(Obj_Entry *obj, int early, const Elf_Dyn **dyn_rpath,
     const Elf32_Word *hashval;
     Elf32_Word bkt, nmaskwords;
     int bloom_size32;
-    bool nmw_power2;
     int plttype = DT_REL;
 
     *dyn_rpath = NULL;
@@ -973,16 +974,15 @@ digest_dynamic1(Obj_Entry *obj, int early, const Elf_Dyn **dyn_rpath,
 		obj->symndx_gnu = hashtab[1];
 		nmaskwords = hashtab[2];
 		bloom_size32 = (__ELF_WORD_SIZE / 32) * nmaskwords;
-		/* Number of bitmask words is required to be power of 2 */
-		nmw_power2 = ((nmaskwords & (nmaskwords - 1)) == 0);
 		obj->maskwords_bm_gnu = nmaskwords - 1;
 		obj->shift2_gnu = hashtab[3];
 		obj->bloom_gnu = (Elf_Addr *) (hashtab + 4);
 		obj->buckets_gnu = hashtab + 4 + bloom_size32;
 		obj->chain_zero_gnu = obj->buckets_gnu + obj->nbuckets_gnu -
 		  obj->symndx_gnu;
-		obj->valid_hash_gnu = nmw_power2 && obj->nbuckets_gnu > 0 &&
-		  obj->buckets_gnu != NULL;
+		/* Number of bitmask words is required to be power of 2 */
+		obj->valid_hash_gnu = powerof2(nmaskwords) &&
+		    obj->nbuckets_gnu > 0 && obj->buckets_gnu != NULL;
 	    }
 	    break;
 
@@ -2149,6 +2149,7 @@ do_load_object(int fd, const char *name, char *path, struct stat *sbp,
 	return (NULL);
     }
 
+    obj->dlopened = (flags & RTLD_LO_DLOPEN) != 0;
     *obj_tail = obj;
     obj_tail = &obj->next;
     obj_count++;
@@ -3419,17 +3420,16 @@ rtld_dirname(const char *path, char *bname)
 static int
 rtld_dirname_abs(const char *path, char *base)
 {
-	char base_rel[PATH_MAX];
+	char *last;
 
-	if (rtld_dirname(path, base) == -1)
+	if (realpath(path, base) == NULL)
 		return (-1);
-	if (base[0] == '/')
-		return (0);
-	if (getcwd(base_rel, sizeof(base_rel)) == NULL ||
-	    strlcat(base_rel, "/", sizeof(base_rel)) >= sizeof(base_rel) ||
-	    strlcat(base_rel, base, sizeof(base_rel)) >= sizeof(base_rel))
+	dbg("%s -> %s", path, base);
+	last = strrchr(base, '/');
+	if (last == NULL)
 		return (-1);
-	strcpy(base, base_rel);
+	if (last != base)
+		*last = '\0';
 	return (0);
 }
 
@@ -4750,6 +4750,27 @@ _rtld_get_stack_prot(void)
 {
 
 	return (stack_prot);
+}
+
+int
+_rtld_is_dlopened(void *arg)
+{
+	Obj_Entry *obj;
+	RtldLockState lockstate;
+	int res;
+
+	rlock_acquire(rtld_bind_lock, &lockstate);
+	obj = dlcheck(arg);
+	if (obj == NULL)
+		obj = obj_from_addr(arg);
+	if (obj == NULL) {
+		_rtld_error("No shared object contains address");
+		lock_release(rtld_bind_lock, &lockstate);
+		return (-1);
+	}
+	res = obj->dlopened ? 1 : 0;
+	lock_release(rtld_bind_lock, &lockstate);
+	return (res);
 }
 
 static void

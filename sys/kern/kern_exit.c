@@ -45,7 +45,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/sysproto.h>
-#include <sys/capability.h>
+#include <sys/capsicum.h>
 #include <sys/eventhandler.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
@@ -73,6 +73,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/sdt.h>
 #include <sys/shm.h>
 #include <sys/sem.h>
+#include <sys/umtx.h>
 #ifdef KTRACE
 #include <sys/ktrace.h>
 #endif
@@ -125,6 +126,31 @@ proc_realparent(struct proc *child)
 	return (parent);
 }
 
+void
+reaper_abandon_children(struct proc *p, bool exiting)
+{
+	struct proc *p1, *p2, *ptmp;
+
+	sx_assert(&proctree_lock, SX_LOCKED);
+	KASSERT(p != initproc, ("reaper_abandon_children for initproc"));
+	if ((p->p_treeflag & P_TREE_REAPER) == 0)
+		return;
+	p1 = p->p_reaper;
+	LIST_FOREACH_SAFE(p2, &p->p_reaplist, p_reapsibling, ptmp) {
+		LIST_REMOVE(p2, p_reapsibling);
+		p2->p_reaper = p1;
+		p2->p_reapsubtree = p->p_reapsubtree;
+		LIST_INSERT_HEAD(&p1->p_reaplist, p2, p_reapsibling);
+		if (exiting && p2->p_pptr == p) {
+			PROC_LOCK(p2);
+			proc_reparent(p2, p1);
+			PROC_UNLOCK(p2);
+		}
+	}
+	KASSERT(LIST_EMPTY(&p->p_reaplist), ("p_reaplist not empty"));
+	p->p_treeflag &= ~P_TREE_REAPER;
+}
+
 static void
 clear_orphan(struct proc *p)
 {
@@ -162,7 +188,8 @@ sys_sys_exit(struct thread *td, struct sys_exit_args *uap)
 void
 exit1(struct thread *td, int rv)
 {
-	struct proc *p, *nq, *q;
+	struct proc *p, *nq, *q, *t;
+	struct thread *tdt;
 	struct vnode *ttyvp = NULL;
 
 	mtx_assert(&Giant, MA_NOTOWNED);
@@ -208,7 +235,7 @@ exit1(struct thread *td, int rv)
 		 * re-check all suspension request, the thread should
 		 * either be suspended there or exit.
 		 */
-		if (!thread_single(SINGLE_EXIT))
+		if (!thread_single(p, SINGLE_EXIT))
 			/*
 			 * All other activity in this process is now
 			 * stopped.  Threading support has been turned
@@ -450,24 +477,34 @@ exit1(struct thread *td, int rv)
 	WITNESS_WARN(WARN_PANIC, NULL, "process (pid %d) exiting", p->p_pid);
 
 	/*
-	 * Reparent all of our children to init.
+	 * Reparent all children processes:
+	 * - traced ones to the original parent (or init if we are that parent)
+	 * - the rest to init
 	 */
 	sx_xlock(&proctree_lock);
 	q = LIST_FIRST(&p->p_children);
 	if (q != NULL)		/* only need this if any child is S_ZOMB */
-		wakeup(initproc);
+		wakeup(q->p_reaper);
 	for (; q != NULL; q = nq) {
 		nq = LIST_NEXT(q, p_sibling);
 		PROC_LOCK(q);
-		proc_reparent(q, initproc);
 		q->p_sigparent = SIGCHLD;
-		/*
-		 * Traced processes are killed
-		 * since their existence means someone is screwing up.
-		 */
-		if (q->p_flag & P_TRACED) {
-			struct thread *temp;
 
+		if (!(q->p_flag & P_TRACED)) {
+			proc_reparent(q, q->p_reaper);
+		} else {
+			/*
+			 * Traced processes are killed since their existence
+			 * means someone is screwing up.
+			 */
+			t = proc_realparent(q);
+			if (t == p) {
+				proc_reparent(q, q->p_reaper);
+			} else {
+				PROC_LOCK(t);
+				proc_reparent(q, t);
+				PROC_UNLOCK(t);
+			}
 			/*
 			 * Since q was found on our children list, the
 			 * proc_reparent() call moved q to the orphan
@@ -476,8 +513,8 @@ exit1(struct thread *td, int rv)
 			 */
 			clear_orphan(q);
 			q->p_flag &= ~(P_TRACED | P_STOPPED_TRACE);
-			FOREACH_THREAD_IN_PROC(q, temp)
-				temp->td_dbgflags &= ~TDB_SUSPEND;
+			FOREACH_THREAD_IN_PROC(q, tdt)
+				tdt->td_dbgflags &= ~TDB_SUSPEND;
 			kern_psignal(q, SIGKILL);
 		}
 		PROC_UNLOCK(q);
@@ -553,7 +590,7 @@ exit1(struct thread *td, int rv)
 			mtx_unlock(&p->p_pptr->p_sigacts->ps_mtx);
 			pp = p->p_pptr;
 			PROC_UNLOCK(pp);
-			proc_reparent(p, initproc);
+			proc_reparent(p, p->p_reaper);
 			p->p_sigparent = SIGCHLD;
 			PROC_LOCK(p->p_pptr);
 
@@ -566,8 +603,8 @@ exit1(struct thread *td, int rv)
 		} else
 			mtx_unlock(&p->p_pptr->p_sigacts->ps_mtx);
 
-		if (p->p_pptr == initproc)
-			kern_psignal(p->p_pptr, SIGCHLD);
+		if (p->p_pptr == p->p_reaper || p->p_pptr == initproc)
+			childproc_exited(p);
 		else if (p->p_sigparent != 0) {
 			if (p->p_sigparent == SIGCHLD)
 				childproc_exited(p);
@@ -601,6 +638,7 @@ exit1(struct thread *td, int rv)
 	wakeup(p->p_pptr);
 	cv_broadcast(&p->p_pwait);
 	sched_exit(p->p_pptr, td);
+	umtx_thread_exit(td);
 	PROC_SLOCK(p);
 	p->p_state = PRS_ZOMBIE;
 	PROC_UNLOCK(p->p_pptr);
@@ -840,6 +878,8 @@ proc_reap(struct thread *td, struct proc *p, int *status, int options)
 	LIST_REMOVE(p, p_list);	/* off zombproc */
 	sx_xunlock(&allproc_lock);
 	LIST_REMOVE(p, p_sibling);
+	reaper_abandon_children(p, true);
+	LIST_REMOVE(p, p_reapsibling);
 	PROC_LOCK(p);
 	clear_orphan(p);
 	PROC_UNLOCK(p);
