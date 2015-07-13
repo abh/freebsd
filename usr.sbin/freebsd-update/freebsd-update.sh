@@ -43,12 +43,15 @@ Options:
                   (default: /var/db/freebsd-update/)
   -f conffile  -- Read configuration options from conffile
                   (default: /etc/freebsd-update.conf)
+  -F           -- Force a fetch operation to proceed
   -k KEY       -- Trust an RSA key with SHA256 hash of KEY
   -r release   -- Target for upgrade (e.g., 6.2-RELEASE)
   -s server    -- Server from which to fetch updates
                   (default: update.FreeBSD.org)
   -t address   -- Mail output of cron command, if any, to address
                   (default: root)
+  --not-running-from-cron
+               -- Run without a tty, for use by automated tools
 Commands:
   fetch        -- Fetch updates from server
   cron         -- Sleep rand(3600) seconds, fetch updates, and send an
@@ -213,7 +216,15 @@ config_KeepModifiedMetadata () {
 # Add to the list of components which should be kept updated.
 config_Components () {
 	for C in $@; do
-		COMPONENTS="${COMPONENTS} ${C}"
+		if [ "$C" = "src" ]; then
+			if [ -e /usr/src/COPYRIGHT ]; then
+				COMPONENTS="${COMPONENTS} ${C}"
+			else
+				echo "src component not installed, skipped"
+			fi
+		else
+			COMPONENTS="${COMPONENTS} ${C}"
+		fi
 	done
 }
 
@@ -399,6 +410,12 @@ init_params () {
 
 	# No commands specified yet
 	COMMANDS=""
+
+	# Force fetch to proceed
+	FORCEFETCH=0
+
+	# Run without a TTY
+	NOTTYOK=0
 }
 
 # Parse the command line
@@ -410,6 +427,12 @@ parse_cmdline () {
 			if [ $# -eq 1 ]; then usage; fi
 			if [ ! -z "${CONFFILE}" ]; then usage; fi
 			shift; CONFFILE="$1"
+			;;
+		-F)
+			FORCEFETCH=1
+			;;
+		--not-running-from-cron)
+			NOTTYOK=1
 			;;
 
 		# Configuration file equivalents
@@ -580,6 +603,7 @@ fetchupgrade_check_params () {
 	_KEYPRINT_z="Key must be given via -k option or configuration file."
 	_KEYPRINT_bad="Invalid key fingerprint: "
 	_WORKDIR_bad="Directory does not exist or is not writable: "
+	_WORKDIR_bad2="Directory is not on a persistent filesystem: "
 
 	if [ -z "${SERVERNAME}" ]; then
 		echo -n "`basename $0`: "
@@ -603,6 +627,13 @@ fetchupgrade_check_params () {
 		echo ${WORKDIR}
 		exit 1
 	fi
+	case `df -T ${WORKDIR}` in */dev/md[0-9]* | *tmpfs*)
+		echo -n "`basename $0`: "
+		echo -n "${_WORKDIR_bad2}"
+		echo ${WORKDIR}
+		exit 1
+		;;
+	esac
 	chmod 700 ${WORKDIR}
 	cd ${WORKDIR} || exit 1
 
@@ -663,6 +694,14 @@ fetch_check_params () {
 		echo -n "`basename $0`: "
 		echo -n "-r option is meaningless with 'fetch' command.  "
 		echo "(Did you mean 'upgrade' instead?)"
+		exit 1
+	fi
+
+	# Check that we have updates ready to install
+	if [ -f ${BDHASH}-install/kerneldone -a $FORCEFETCH -eq 0 ]; then
+		echo "You have a partially completed upgrade pending"
+		echo "Run '$0 install' first."
+		echo "Run '$0 fetch -F' to proceed anyway."
 		exit 1
 	fi
 }
@@ -1200,7 +1239,7 @@ fetch_metadata_sanity () {
 	# Some aliases to save space later: ${P} is a character which can
 	# appear in a path; ${M} is the four numeric metadata fields; and
 	# ${H} is a sha256 hash.
-	P="[-+./:=%@_[~[:alnum:]]"
+	P="[-+./:=,%@_[~[:alnum:]]"
 	M="[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+"
 	H="[0-9a-f]{64}"
 
@@ -2256,7 +2295,7 @@ upgrade_oldall_to_oldnew () {
 }
 
 # Helper for upgrade_merge: Return zero true iff the two files differ only
-# in the contents of their $FreeBSD$ tags.
+# in the contents of their RCS tags.
 samef () {
 	X=`sed -E 's/\\$FreeBSD.*\\$/\$FreeBSD\$/' < $1 | ${SHA256}`
 	Y=`sed -E 's/\\$FreeBSD.*\\$/\$FreeBSD\$/' < $2 | ${SHA256}`
@@ -2352,7 +2391,7 @@ upgrade_merge () {
 		# Ask the user to handle any files which didn't merge.
 		while read F; do
 			# If the installed file differs from the version in
-			# the old release only due to $FreeBSD$ tag expansion
+			# the old release only due to RCS tag expansion
 			# then just use the version in the new release.
 			if samef merge/old/${F} merge/${OLDRELNUM}/${F}; then
 				cp merge/${RELNUM}/${F} merge/new/${F}
@@ -2374,14 +2413,14 @@ manually...
 		# of merging files.
 		while read F; do
 			# Skip files which haven't changed except possibly
-			# in their $FreeBSD$ tags.
+			# in their RCS tags.
 			if [ -f merge/old/${F} ] && [ -f merge/new/${F} ] &&
 			    samef merge/old/${F} merge/new/${F}; then
 				continue
 			fi
 
 			# Skip files where the installed file differs from
-			# the old file only due to $FreeBSD$ tags.
+			# the old file only due to RCS tags.
 			if [ -f merge/old/${F} ] &&
 			    [ -f merge/${OLDRELNUM}/${F} ] &&
 			    samef merge/old/${F} merge/${OLDRELNUM}/${F}; then
@@ -2611,10 +2650,10 @@ install_unschg () {
 	while read F; do
 		if ! [ -e ${BASEDIR}/${F} ]; then
 			continue
+		else
+			echo ${BASEDIR}/${F}
 		fi
-
-		chflags noschg ${BASEDIR}/${F} || return 1
-	done < filelist
+	done < filelist | xargs chflags noschg || return 1
 
 	# Clean up
 	rm filelist
@@ -3060,21 +3099,8 @@ IDS_compare () {
 	mv INDEX-NOTMATCHING.tmp INDEX-NOTMATCHING
 
 	# Go through the lines and print warnings.
-	while read LINE; do
-		FPATH=`echo "${LINE}" | cut -f 1 -d '|'`
-		TYPE=`echo "${LINE}" | cut -f 2 -d '|'`
-		OWNER=`echo "${LINE}" | cut -f 3 -d '|'`
-		GROUP=`echo "${LINE}" | cut -f 4 -d '|'`
-		PERM=`echo "${LINE}" | cut -f 5 -d '|'`
-		HASH=`echo "${LINE}" | cut -f 6 -d '|'`
-		LINK=`echo "${LINE}" | cut -f 7 -d '|'`
-		P_TYPE=`echo "${LINE}" | cut -f 8 -d '|'`
-		P_OWNER=`echo "${LINE}" | cut -f 9 -d '|'`
-		P_GROUP=`echo "${LINE}" | cut -f 10 -d '|'`
-		P_PERM=`echo "${LINE}" | cut -f 11 -d '|'`
-		P_HASH=`echo "${LINE}" | cut -f 12 -d '|'`
-		P_LINK=`echo "${LINE}" | cut -f 13 -d '|'`
-
+	local IFS='|'
+	while read FPATH TYPE OWNER GROUP PERM HASH LINK P_TYPE P_OWNER P_GROUP P_PERM P_HASH P_LINK; do
 		# Warn about different object types.
 		if ! [ "${TYPE}" = "${P_TYPE}" ]; then
 			echo -n "${FPATH} is a "
@@ -3202,7 +3228,7 @@ get_params () {
 # Fetch command.  Make sure that we're being called
 # interactively, then run fetch_check_params and fetch_run
 cmd_fetch () {
-	if [ ! -t 0 ]; then
+	if [ ! -t 0 -a $NOTTYOK -eq 0 ]; then
 		echo -n "`basename $0` fetch should not "
 		echo "be run non-interactively."
 		echo "Run `basename $0` cron instead."

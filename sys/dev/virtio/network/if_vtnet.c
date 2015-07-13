@@ -1078,8 +1078,12 @@ vtnet_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			    (IFF_PROMISC | IFF_ALLMULTI)) {
 				if (sc->vtnet_flags & VTNET_FLAG_CTRL_RX)
 					vtnet_rx_filter(sc);
-				else
-					error = ENOTSUP;
+				else {
+					ifp->if_flags |= IFF_PROMISC;
+					if ((ifp->if_flags ^ sc->vtnet_if_flags)
+					    & IFF_ALLMULTI)
+						error = ENOTSUP;
+				}
 			}
 		} else
 			vtnet_init_locked(sc);
@@ -1703,7 +1707,7 @@ vtnet_rxq_input(struct vtnet_rxq *rxq, struct mbuf *m,
 	}
 
 	m->m_pkthdr.flowid = rxq->vtnrx_id;
-	m->m_flags |= M_FLOWID;
+	M_HASHTYPE_SET(m, M_HASHTYPE_OPAQUE);
 
 	/*
 	 * BMV: FreeBSD does not have the UNNECESSARY and PARTIAL checksum
@@ -2349,7 +2353,8 @@ vtnet_txq_mq_start(struct ifnet *ifp, struct mbuf *m)
 	sc = ifp->if_softc;
 	npairs = sc->vtnet_act_vq_pairs;
 
-	if (m->m_flags & M_FLOWID)
+	/* check if flowid is set */
+	if (M_HASHTYPE_GET(m) != M_HASHTYPE_NONE)
 		i = m->m_pkthdr.flowid % npairs;
 	else
 		i = curcpu % npairs;
@@ -2754,6 +2759,11 @@ vtnet_drain_rxtx_queues(struct vtnet_softc *sc)
 	struct vtnet_rxq *rxq;
 	struct vtnet_txq *txq;
 	int i;
+
+#ifdef DEV_NETMAP
+	if (nm_native_on(NA(sc->vtnet_ifp)))
+		return;
+#endif /* DEV_NETMAP */
 
 	for (i = 0; i < sc->vtnet_act_vq_pairs; i++) {
 		rxq = &sc->vtnet_rxqs[i];

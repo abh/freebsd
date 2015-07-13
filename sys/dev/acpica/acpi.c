@@ -1148,7 +1148,7 @@ acpi_sysres_alloc(device_t dev)
 	if (res != NULL) {
 	    rman_manage_region(rm, rman_get_start(res), rman_get_end(res));
 	    rle->res = res;
-	} else
+	} else if (bootverbose)
 	    device_printf(dev, "reservation of %lx, %lx (%d) failed\n",
 		rle->start, rle->count, rle->type);
     }
@@ -2749,6 +2749,8 @@ acpi_EnterSleepState(struct acpi_softc *sc, int state)
 	return_ACPI_STATUS (AE_OK);
     }
 
+    EVENTHANDLER_INVOKE(power_suspend_early);
+    stop_all_proc();
     EVENTHANDLER_INVOKE(power_suspend);
 
     if (smp_started) {
@@ -2891,6 +2893,8 @@ backout:
 	sched_unbind(curthread);
 	thread_unlock(curthread);
     }
+
+    resume_all_proc();
 
     EVENTHANDLER_INVOKE(power_resume);
 

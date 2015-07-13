@@ -38,10 +38,17 @@
 #   xargs -n1 | sort | uniq -d;
 # done
 
+# 20150506
+OLD_FILES+=usr/share/man/man9/NDHASGIANT.9.gz
+# 20141223: remove in6_gif.h and in_gif.h
+OLD_FILES+=usr/include/netinet/in_gif.h
+OLD_FILES+=usr/include/netinet6/in6_gif.h
 # 20141205: convert sbin/mdconfig/tests to ATF format tests
 OLD_FILES+=usr/tests/sbin/mdconfig/legacy_test
 OLD_FILES+=usr/tests/sbin/mdconfig/mdconfig.test
 OLD_FILES+=usr/tests/sbin/mdconfig/run.pl
+# 20141107: overhaul if_gre(4)
+OLD_FILES+=usr/include/netinet/ip_gre.h
 # 20141028: debug files accidentally installed as directory name
 OLD_FILES+=usr/lib/debug/usr/lib/i18n
 OLD_FILES+=usr/lib/debug/usr/lib/private
@@ -237,6 +244,7 @@ OLD_FILES+=usr/include/lwres/net.h
 OLD_FILES+=usr/include/lwres/netdb.h
 OLD_FILES+=usr/include/lwres/platform.h
 OLD_FILES+=usr/include/lwres/result.h
+OLD_FILES+=usr/include/lwres/string.h
 OLD_FILES+=usr/include/lwres/version.h
 OLD_FILES+=usr/lib/liblwres.a
 OLD_FILES+=usr/lib/liblwres.so
