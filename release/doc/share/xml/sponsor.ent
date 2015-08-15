@@ -15,6 +15,7 @@
 
 <!ENTITY darpa		"DARPA">
 <!ENTITY darpa_afrl	"DARPA, AFRL">
+<!ENTITY dell		"Dell, Inc.">
 
 <!ENTITY ff		"The&nbsp;&os;&nbsp;Foundation">
 <!ENTITY ff.url		"https://www.FreeBSDFoundation.org/">
@@ -34,6 +35,7 @@
 <!ENTITY netgate	"Netgate">
 
 <!ENTITY scaleengine	"ScaleEngine, Inc.">
+<!ENTITY solarflare	"Solarflare Communications, Inc.">
 <!ENTITY spectralogic	"Spectra Logic">
 
 <!ENTITY yandex		"Yandex LLC">
